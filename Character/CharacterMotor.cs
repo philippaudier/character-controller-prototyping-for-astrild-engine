@@ -39,10 +39,12 @@ public class CharacterMotor
             groundNormal = query.Value.normal;
         }
         float capsuleBottom = _data.Position.Y - (_data.Height * 0.5f);
-        // Only snap to ground if we're not currently moving upward -- this prevents
-        // a freshly-applied jump from being immediately cancelled by the snap when
+        float capsuleTop = _data.Position.Y + (_data.Height * 0.5f);
+        // Only snap to ground if we're not currently moving upward and the surface
+        // is not above the character (prevents snapping to ceilings while passing underneath).
+        // This prevents a freshly-applied jump from being immediately cancelled by the snap when
         // GroundSnapDistance is larger than a single-frame jump displacement.
-        if (capsuleBottom <= groundY + _data.GroundSnapDistance && _data.Velocity.Y <= 0.01f)
+        if (capsuleBottom <= groundY + _data.GroundSnapDistance && _data.Velocity.Y <= 0.01f && groundY <= capsuleTop - 0.05f)
         {
             // Snap to ground
             var p = _data.Position;
