@@ -767,10 +767,34 @@ public class Game : GameWindow
                 }
                 if (totalPen > 0f)
                 {
-                    // average push and normal, apply a small reduction to avoid over-correction
+                    // average push and normal
                     var avgPush = accumPush / totalPen;
-                    // Slightly dampen the vertical lifting to keep character grounded behavior natural
-                    avgPush.Y = MathF.Min(avgPush.Y, avgPush.Y * 1.0f);
+
+                    // Decide whether to snap the character onto the ramp surface (when interacting from above)
+                    float cylHalfLocal = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
+                    float bottomLocal = _ccData.Position.Y - cylHalfLocal;
+                    if (r.TryGetHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), out float centerH, out Vector3 centerN))
+                    {
+                        // If the ramp top is at or slightly above the capsule bottom, snap onto the ramp.
+                        if (centerH >= bottomLocal - 0.05f)
+                        {
+                            var p = _ccData.Position;
+                            p.Y = centerH + cylHalfLocal + _ccData.SkinWidth;
+                            _ccData.Position = p;
+                            _ccData.IsGrounded = true;
+                            _ccData.GroundNormal = centerN;
+                            // cancel downward velocity when landing on ramp
+                            if (_ccData.Velocity.Y < 0f)
+                            {
+                                var v = _ccData.Velocity;
+                                v.Y = 0f;
+                                _ccData.Velocity = v;
+                            }
+                            continue;
+                        }
+                    }
+
+                    // otherwise apply averaged push (damp slightly)
                     _ccData.Position += avgPush * 0.95f;
                 }
             }
