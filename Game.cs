@@ -20,6 +20,7 @@ public class Game : GameWindow
     private SimpleShader _shader = null!;
     private int _groundVao, _groundVbo, _groundEbo, _groundIndexCount;
     private int _cubeVao, _cubeVbo, _cubeEbo, _cubeIndexCount;
+    private int _sphereVao, _sphereVbo, _sphereEbo, _sphereIndexCount;
 
     private CharacterControllerData _ccData = null!;
     private CharacterMotor _motor = null!;
@@ -110,6 +111,7 @@ public class Game : GameWindow
         // Create geometry
         (_groundVao, _groundVbo, _groundEbo, _groundIndexCount) = MeshPrimitives.CreateGroundQuad();
         (_cubeVao, _cubeVbo, _cubeEbo, _cubeIndexCount) = MeshPrimitives.CreateUnitCube();
+        (_sphereVao, _sphereVbo, _sphereEbo, _sphereIndexCount) = MeshPrimitives.CreateUVSphere(1f, 12, 20);
 
         _ccData = new CharacterControllerData();
         _motor = new CharacterMotor(_ccData);
@@ -138,6 +140,10 @@ public class Game : GameWindow
         // a couple of scattered small obstacles
         _scene.Add(new FlatPlatform(new Vector3(5f, 0.2f, -3f) * scale, 0.6f * scale, 0.6f * scale, 0.2f * scale));
         _scene.Add(new FlatPlatform(new Vector3(1.5f, 1.2f, -6f) * scale, 2f * scale, 2f * scale, 1.2f * scale));
+        // rounded test obstacles
+        _scene.Add(new Bump(new Vector3(2.5f, 0.25f * scale, -1.5f) * scale, 0.6f * scale));
+        _scene.Add(new Bump(new Vector3(-1.5f, 0.25f * scale, -2.5f) * scale, 0.4f * scale));
+        _scene.Add(new SphereObstacle(new Vector3(4f, 0.6f * scale, 2.5f) * scale, 0.6f * scale));
     }
 
     protected override void OnResize(ResizeEventArgs e)
@@ -302,6 +308,27 @@ public class Game : GameWindow
                     GL.DrawElements(PrimitiveType.Triangles, _cubeIndexCount, DrawElementsType.UnsignedInt, 0);
                 }
             }
+            else if (s is Scene.Bump bp)
+            {
+                // render hemisphere as sphere scaled to radius, positioned at center
+                var scaleMat = Matrix4.CreateScale(bp.Radius);
+                var transMat = Matrix4.CreateTranslation(bp.Center);
+                model = scaleMat * transMat;
+                _shader.SetMatrix4("u_Model", model);
+                _shader.SetVector3("u_Color", new Vector3(0.7f, 0.3f, 0.3f));
+                GL.BindVertexArray(_sphereVao);
+                GL.DrawElements(PrimitiveType.Triangles, _sphereIndexCount, DrawElementsType.UnsignedInt, 0);
+            }
+            else if (s is Scene.SphereObstacle so)
+            {
+                var scaleMat = Matrix4.CreateScale(so.Radius);
+                var transMat = Matrix4.CreateTranslation(so.Center);
+                model = scaleMat * transMat;
+                _shader.SetMatrix4("u_Model", model);
+                _shader.SetVector3("u_Color", new Vector3(0.3f, 0.6f, 0.8f));
+                GL.BindVertexArray(_sphereVao);
+                GL.DrawElements(PrimitiveType.Triangles, _sphereIndexCount, DrawElementsType.UnsignedInt, 0);
+            }
             // Also perform capsule-vs-OBB resolution for each flat platform
             if (s is FlatPlatform obb)
             {
@@ -446,6 +473,9 @@ public class Game : GameWindow
         GL.DeleteVertexArray(_cubeVao);
         GL.DeleteBuffer(_cubeVbo);
         GL.DeleteBuffer(_cubeEbo);
+        GL.DeleteVertexArray(_sphereVao);
+        GL.DeleteBuffer(_sphereVbo);
+        GL.DeleteBuffer(_sphereEbo);
 
         _shader.Dispose();
         _imgui.Dispose();

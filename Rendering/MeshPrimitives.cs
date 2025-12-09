@@ -289,4 +289,63 @@ public static class MeshPrimitives
         GL.BindVertexArray(0);
         return (vao, vbo, ebo, idx.Count);
     }
+
+    public static (int vao, int vbo, int ebo, int indexCount) CreateUVSphere(float radius = 1f, int stacks = 12, int slices = 16)
+    {
+        var verts = new System.Collections.Generic.List<float>();
+        var idx = new System.Collections.Generic.List<uint>();
+
+        for (int i = 0; i <= stacks; i++)
+        {
+            float phi = MathF.PI * i / stacks; // 0..PI
+            float y = MathF.Cos(phi);
+            float r = MathF.Sin(phi);
+            for (int j = 0; j <= slices; j++)
+            {
+                float theta = 2f * MathF.PI * j / slices;
+                float x = r * MathF.Cos(theta);
+                float z = r * MathF.Sin(theta);
+                // position
+                verts.Add(x * radius);
+                verts.Add(y * radius);
+                verts.Add(z * radius);
+                // normal (same as position normalized for unit sphere)
+                verts.Add(x);
+                verts.Add(y);
+                verts.Add(z);
+            }
+        }
+
+        for (int i = 0; i < stacks; i++)
+        {
+            for (int j = 0; j < slices; j++)
+            {
+                uint a = (uint)(i * (slices + 1) + j);
+                uint b = (uint)((i + 1) * (slices + 1) + j);
+                uint c = (uint)((i + 1) * (slices + 1) + (j + 1));
+                uint d = (uint)(i * (slices + 1) + (j + 1));
+                idx.Add(a); idx.Add(b); idx.Add(c);
+                idx.Add(a); idx.Add(c); idx.Add(d);
+            }
+        }
+
+        int vao = GL.GenVertexArray();
+        int vbo = GL.GenBuffer();
+        int ebo = GL.GenBuffer();
+
+        GL.BindVertexArray(vao);
+        GL.BindBuffer(BufferTarget.ArrayBuffer, vbo);
+        GL.BufferData(BufferTarget.ArrayBuffer, verts.Count * sizeof(float), verts.ToArray(), BufferUsageHint.StaticDraw);
+        GL.BindBuffer(BufferTarget.ElementArrayBuffer, ebo);
+        GL.BufferData(BufferTarget.ElementArrayBuffer, idx.Count * sizeof(uint), idx.ToArray(), BufferUsageHint.StaticDraw);
+
+        GL.EnableVertexAttribArray(0);
+        GL.EnableVertexAttribArray(1);
+        int stride = 6 * sizeof(float);
+        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, stride, 0);
+        GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, stride, 3 * sizeof(float));
+
+        GL.BindVertexArray(0);
+        return (vao, vbo, ebo, idx.Count);
+    }
 }
