@@ -351,8 +351,55 @@ public class Game : GameWindow
                 }
                 else if (CapsuleIntersectsOBB(segA, segB, _ccData.Radius, obbCenter, halfExtents, rotY, out Vector3 mtv))
                 {
-                    // push the character by the MTV
+                    // If the capsule is mostly below the platform bottom, avoid pushing it upward
+                    // which would place the player on top of the platform when they actually
+                    // came from underneath. Prefer a downward or lateral-only resolution.
+                    float capBottomLocal = _ccData.Position.Y - (_ccData.Height * 0.5f);
+                    if (capBottomLocal < platformBottom - 0.02f && mtv.Y > 0f)
+                    {
+                        mtv.Y = Math.Min(0f, mtv.Y);
+                        if (Math.Abs(mtv.X) < 1e-6f && Math.Abs(mtv.Z) < 1e-6f)
+                        {
+                            // if mtv is purely vertical upward, convert to a downward push
+                            float capTopLocal = _ccData.Position.Y + cylHalf;
+                            float down = capTopLocal - platformBottom + 0.001f;
+                            mtv.Y = -down;
+                        }
+                    }
                     _ccData.Position += mtv;
+                }
+            }
+        }
+
+        // Final ceiling/overhang resolution: ensure the character does not end up with its
+        // capsule top penetrating a nearby surface (e.g. low ceiling or underside of a ramp).
+        // We perform this after all lateral/ramp/sphere resolutions so the final position
+        // respects both ground and ceiling constraints.
+        {
+            float half2 = _ccData.Height * 0.5f;
+            float finalCapBottom = _ccData.Position.Y - half2;
+            float finalCapTop = _ccData.Position.Y + half2;
+            var ceiling = QuerySceneHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), finalCapTop);
+            if (ceiling != null)
+            {
+                float surfaceH = ceiling.Value.height;
+                if (surfaceH > finalCapBottom + 1e-4f)
+                {
+                    float allowedTop = surfaceH - _ccData.SkinWidth;
+                    if (finalCapTop > allowedTop)
+                    {
+                        float downPen = finalCapTop - allowedTop;
+                        var p = _ccData.Position;
+                        p.Y -= downPen;
+                        _ccData.Position = p;
+                        if (_ccData.Velocity.Y > 0f)
+                        {
+                            var v = _ccData.Velocity;
+                            v.Y = 0f;
+                            _ccData.Velocity = v;
+                        }
+                        _ccData.IsGrounded = false;
+                    }
                 }
             }
         }
@@ -737,80 +784,84 @@ public class Game : GameWindow
             }
             else if (s is Ramp r)
             {
-                // Build a small contact manifold by sampling points along the capsule segment.
-                // Collect multiple penetration contacts and average their pushes to avoid jitter.
+                // Analytical capsule-vs-ramp handling:
+                // Compute ramp plane and test closest point on capsule segment to that plane.
                 float cylHalf = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
                 var segA = _ccData.Position + new Vector3(0f, cylHalf, 0f);
                 var segB = _ccData.Position - new Vector3(0f, cylHalf, 0f);
-                int samples = 8;
-                float totalPen = 0f;
-                Vector3 accumPush = Vector3.Zero;
-                Vector3 accumNormal = Vector3.Zero;
-                for (int i = 0; i < samples; i++)
-                {
-                    float t = samples == 1 ? 0f : (float)i / (samples - 1);
-                    var sample = Vector3.Lerp(segA, segB, t);
-                        if (r.TryGetHeight(new Vector2(sample.X, sample.Z), out float h, out Vector3 normal))
-                        {
-                            float deltaY = sample.Y - h;
-                            // Ignore samples that are substantially below the ramp surface (we allow passing under).
-                            if (sample.Y < h - 0.02f)
-                                continue;
-                            if (deltaY < _ccData.Radius)
-                            {
-                                float pen = _ccData.Radius - deltaY;
-                                var push = normal * pen;
-                                accumPush += push;
-                                accumNormal += normal * pen;
-                                totalPen += pen;
-                            }
-                        }
-                }
-                if (totalPen > 0f)
-                {
-                    // average push and normal
-                    var avgPush = accumPush / totalPen;
 
-                    // Decide whether to snap the character onto the ramp surface (when interacting from above)
-                    float halfHeight = _ccData.Height * 0.5f;
-                    float bottomLocal = _ccData.Position.Y - halfHeight;
-                    // Use ring sampling around the capsule XZ to compute a reliable surface height under the capsule
-                    float sampleRadius = MathF.Max(_ccData.Radius * 0.5f, 0.01f);
-                    int ringSamples = 8;
-                    float bestCenterH = float.MinValue;
-                    Vector3 bestCenterN = Vector3.UnitY;
-                    for (int rs = 0; rs < ringSamples; rs++)
+                // Reconstruct ramp plane in world space (use same points as Ramp.TryGetHeight)
+                var p1 = new Vector3(-r.SizeX * 0.5f, MathHelper.Lerp(r.StartY, r.EndY, 0f), -r.SizeZ * 0.5f);
+                var p2 = new Vector3(r.SizeX * 0.5f, MathHelper.Lerp(r.StartY, r.EndY, 0f), -r.SizeZ * 0.5f);
+                var p3 = new Vector3(-r.SizeX * 0.5f, MathHelper.Lerp(r.StartY, r.EndY, 1f), r.SizeZ * 0.5f);
+                var rot = Quaternion.FromAxisAngle(Vector3.UnitY, MathHelper.DegreesToRadians(r.RotationYDeg));
+                Vector3 WorldP(in Vector3 local) => rot * local + r.Center;
+                var wp1 = WorldP(p1);
+                var wp2 = WorldP(p2);
+                var wp3 = WorldP(p3);
+                var planeNormal = Vector3.Cross(wp2 - wp1, wp3 - wp1).Normalized();
+                var planePoint = WorldP(new Vector3(0f, MathHelper.Lerp(r.StartY, r.EndY, 0.5f), 0f));
+
+                // Signed distances from segment endpoints to plane (positive means in direction of normal)
+                float da = Vector3.Dot(segA - planePoint, planeNormal);
+                float db = Vector3.Dot(segB - planePoint, planeNormal);
+
+                // If both endpoints are well below the plane (more negative than radius), we are passing under the ramp
+                if (da <= -_ccData.Radius && db <= -_ccData.Radius)
+                    continue;
+
+                // Find closest point on segment to plane (if segment crosses plane, t where distance==0, else endpoint with smaller abs distance)
+                float tClosest;
+                if (da * db < 0f)
+                    tClosest = da / (da - db); // where signed distance is zero
+                else
+                    tClosest = MathF.Abs(da) < MathF.Abs(db) ? 0f : 1f;
+
+                var pClosest = Vector3.Lerp(segA, segB, tClosest);
+                float dist = Vector3.Dot(pClosest - planePoint, planeNormal); // signed
+
+                // If the closest point is below the plane more than radius, skip (we're under)
+                if (dist <= -_ccData.Radius) continue;
+
+                // Project the closest point onto the ramp plane and check whether it's within ramp bounds (local XZ inside rectangle)
+                var proj = pClosest - planeNormal * dist; // projection on plane
+
+                // transform proj into ramp local space (inverse yaw)
+                float yaw = MathHelper.DegreesToRadians(-r.RotationYDeg);
+                float cosy = (float)Math.Cos(yaw);
+                float siny = (float)Math.Sin(yaw);
+                float localX = cosy * (proj.X - r.Center.X) - siny * (proj.Z - r.Center.Z);
+                float localZ = siny * (proj.X - r.Center.X) + cosy * (proj.Z - r.Center.Z);
+
+                if (Math.Abs(localX) <= r.SizeX * 0.5f + 1e-5f && Math.Abs(localZ) <= r.SizeZ * 0.5f + 1e-5f)
+                {
+                    // If the projection is within the ramp rectangle and within penetration range, resolve along normal
+                    if (dist < _ccData.Radius)
                     {
-                        float a = (rs / (float)ringSamples) * MathF.PI * 2f;
-                        var sx = _ccData.Position.X + MathF.Cos(a) * sampleRadius;
-                        var sz = _ccData.Position.Z + MathF.Sin(a) * sampleRadius;
-                        if (r.TryGetHeight(new Vector2(sx, sz), out float sh, out Vector3 sn))
+                        // Determine capsule vertical extents before applying any push
+                        float halfHeight = _ccData.Height * 0.5f;
+                        float capBottomPre = _ccData.Position.Y - halfHeight;
+                        float capTopPre = _ccData.Position.Y + halfHeight;
+                        float projHeight = proj.Y;
+
+                        // If the projected point on the ramp is significantly below the capsule bottom,
+                        // we treat the capsule as coming from underneath and skip lifting the capsule onto the ramp.
+                        if (projHeight < capBottomPre - 0.05f)
                         {
-                            if (sh > bestCenterH)
-                            {
-                                bestCenterH = sh;
-                                bestCenterN = sn;
-                            }
+                            // skip this ramp resolution to avoid teleporting the player beneath the ramp
+                            continue;
                         }
-                    }
-                    // also include direct center
-                    if (r.TryGetHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), out float cH, out Vector3 cN))
-                    {
-                        if (cH > bestCenterH) { bestCenterH = cH; bestCenterN = cN; }
-                    }
-                    if (bestCenterH != float.MinValue)
-                    {
-                        float centerH = bestCenterH;
-                        Vector3 centerN = bestCenterN;
-                        // If the ramp top is at or slightly above the capsule bottom, snap onto the ramp.
-                        if (centerH >= bottomLocal - 0.05f)
+
+                        float penetration = _ccData.Radius - dist + 0.0001f;
+                        // push capsule out along plane normal (this will lift the capsule when coming from above)
+                        var push = planeNormal * penetration;
+                        _ccData.Position += push;
+
+                        // If projection point lies at or slightly above capsule bottom, consider grounded
+                        if (projHeight >= capBottomPre - 0.05f && projHeight <= capTopPre - 0.05f && push.Y >= 0f)
                         {
-                            var p = _ccData.Position;
-                            // place capsule so its bottom sits on the ramp top
-                            p.Y = centerH + halfHeight + _ccData.SkinWidth;
-                            _ccData.Position = p;
                             _ccData.IsGrounded = true;
-                            _ccData.GroundNormal = centerN;
+                            _ccData.GroundNormal = planeNormal;
                             // cancel downward velocity when landing on ramp
                             if (_ccData.Velocity.Y < 0f)
                             {
@@ -818,12 +869,81 @@ public class Game : GameWindow
                                 v.Y = 0f;
                                 _ccData.Velocity = v;
                             }
-                            continue;
                         }
                     }
-
-                    // otherwise apply averaged push (damp slightly)
-                    _ccData.Position += avgPush * 0.95f;
+                }
+            }
+            else if (s is Bump bp)
+            {
+                // treat bump as hemisphere; perform analytic capsule-vs-sphere test using the sphere center
+                float cylHalf = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
+                var segA = _ccData.Position + new Vector3(0f, cylHalf, 0f);
+                var segB = _ccData.Position - new Vector3(0f, cylHalf, 0f);
+                // fall through to sphere logic by treating hemisphere center as sphere center but only respond if closest point is above center
+                var sphereCenter = bp.Center;
+                float combined = bp.Radius + _ccData.Radius;
+                // closest point on segment to sphere center
+                var ab = segB - segA;
+                float t = Vector3.Dot(sphereCenter - segA, ab) / MathF.Max(1e-6f, ab.LengthSquared);
+                t = MathHelper.Clamp(t, 0f, 1f);
+                var closest = segA + ab * t;
+                var diff = closest - sphereCenter;
+                float d2 = diff.LengthSquared;
+                if (d2 < combined * combined)
+                {
+                    float d = MathF.Sqrt(d2);
+                    float pen = combined - d + 0.0001f;
+                    Vector3 n = d > 1e-6f ? diff / d : new Vector3(0f, 1f, 0f);
+                    // For hemisphere, only push if closest point is above hemisphere center (y >= center.y)
+                    if (closest.Y >= sphereCenter.Y - 1e-4f)
+                    {
+                        _ccData.Position += n * pen;
+                        // if pushing from above, consider grounded
+                        if (n.Y > 0.5f)
+                        {
+                            _ccData.IsGrounded = true;
+                            _ccData.GroundNormal = n;
+                            if (_ccData.Velocity.Y < 0f)
+                            {
+                                var v = _ccData.Velocity;
+                                v.Y = 0f;
+                                _ccData.Velocity = v;
+                            }
+                        }
+                    }
+                }
+            }
+            else if (s is Scene.SphereObstacle so)
+            {
+                // analytic capsule-vs-sphere collision
+                float cylHalf = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
+                var segA = _ccData.Position + new Vector3(0f, cylHalf, 0f);
+                var segB = _ccData.Position - new Vector3(0f, cylHalf, 0f);
+                var sphereCenter = so.Center;
+                float combined = so.Radius + _ccData.Radius;
+                var ab = segB - segA;
+                float t = Vector3.Dot(sphereCenter - segA, ab) / MathF.Max(1e-6f, ab.LengthSquared);
+                t = MathHelper.Clamp(t, 0f, 1f);
+                var closest = segA + ab * t;
+                var diff = closest - sphereCenter;
+                float d2 = diff.LengthSquared;
+                if (d2 < combined * combined)
+                {
+                    float d = MathF.Sqrt(d2);
+                    float pen = combined - d + 0.0001f;
+                    Vector3 n = d > 1e-6f ? diff / d : new Vector3(0f, 1f, 0f);
+                    _ccData.Position += n * pen;
+                    if (n.Y > 0.5f)
+                    {
+                        _ccData.IsGrounded = true;
+                        _ccData.GroundNormal = n;
+                        if (_ccData.Velocity.Y < 0f)
+                        {
+                            var v = _ccData.Velocity;
+                            v.Y = 0f;
+                            _ccData.Velocity = v;
+                        }
+                    }
                 }
             }
         }
