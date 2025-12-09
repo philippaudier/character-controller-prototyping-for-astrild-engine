@@ -43,6 +43,12 @@ public class Game : GameWindow
     private ImGuiController _imgui = null!;
     private List<SceneSurface> _scene = new List<SceneSurface>();
     private float _sceneScale = 1.0f;
+    // Debug drawing for collision diagnostics
+    private SimpleShader? _lineShader;
+    private int _lineVao, _lineVbo;
+    private List<float> _debugLineVertices = new List<float>(); // interleaved pos.xyz, color.xyz
+    private bool _debugDraw = false;
+    private float _rampProjIgnoreThreshold = 0.05f;
 
     public Game()
         : base(GameWindowSettings.Default, new NativeWindowSettings
@@ -107,6 +113,36 @@ public class Game : GameWindow
     ";
 
         _shader = new SimpleShader(vs, fs);
+
+        // line shader for debug visualization (pos + color)
+        const string lvs = @"#version 330 core
+    layout(location = 0) in vec3 aPos;
+    layout(location = 1) in vec3 aColor;
+    uniform mat4 u_View;
+    uniform mat4 u_Proj;
+    out vec3 vColor;
+    void main() {
+        vColor = aColor;
+        gl_Position = u_Proj * u_View * vec4(aPos, 1.0);
+    }
+    ";
+        const string lfs = @"#version 330 core
+    in vec3 vColor;
+    out vec4 fColor;
+    void main() { fColor = vec4(vColor, 1.0); }
+    ";
+        _lineShader = new SimpleShader(lvs, lfs);
+        // create VAO/VBO for dynamic line drawing
+        _lineVao = GL.GenVertexArray();
+        _lineVbo = GL.GenBuffer();
+        GL.BindVertexArray(_lineVao);
+        GL.BindBuffer(BufferTarget.ArrayBuffer, _lineVbo);
+        GL.BufferData(BufferTarget.ArrayBuffer, 0, IntPtr.Zero, BufferUsageHint.DynamicDraw);
+        GL.EnableVertexAttribArray(0);
+        GL.VertexAttribPointer(0, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), 0);
+        GL.EnableVertexAttribArray(1);
+        GL.VertexAttribPointer(1, 3, VertexAttribPointerType.Float, false, 6 * sizeof(float), 3 * sizeof(float));
+        GL.BindVertexArray(0);
 
         // Create geometry
         (_groundVao, _groundVbo, _groundEbo, _groundIndexCount) = MeshPrimitives.CreateGroundQuad();
@@ -412,6 +448,22 @@ public class Game : GameWindow
         _shader.SetVector3("u_Color", _playerColor);
         GL.BindVertexArray(_cubeVao);
         GL.DrawElements(PrimitiveType.Triangles, _cubeIndexCount, DrawElementsType.UnsignedInt, 0);
+        // Draw debug lines if enabled
+        if (_debugDraw && _debugLineVertices.Count > 0 && _lineShader != null)
+        {
+            GL.LineWidth(2f);
+            _lineShader.Use();
+            _lineShader.SetMatrix4("u_View", view);
+            _lineShader.SetMatrix4("u_Proj", proj);
+            GL.BindVertexArray(_lineVao);
+            // upload vertex data
+            var arr = _debugLineVertices.ToArray();
+            GL.BindBuffer(BufferTarget.ArrayBuffer, _lineVbo);
+            GL.BufferData(BufferTarget.ArrayBuffer, (IntPtr)(sizeof(float) * arr.Length), arr, BufferUsageHint.DynamicDraw);
+            GL.DrawArrays(PrimitiveType.Lines, 0, arr.Length / 6);
+            GL.BindVertexArray(0);
+            GL.LineWidth(1f);
+        }
         // ImGui overlay: Character Controller inspector + lighting
         // ImGui overlay: Character Controller inspector + lighting
         ImGuiNET.ImGui.SetNextWindowSize(new System.Numerics.Vector2(360, 480), ImGuiNET.ImGuiCond.FirstUseEver);
@@ -451,6 +503,12 @@ public class Game : GameWindow
             if (ImGuiNET.ImGui.SliderFloat("Coyote Time", ref tmpCoyote, 0.0f, 0.5f)) _ccData.CoyoteTime = tmpCoyote;
             float tmpBuffer = _ccData.JumpBufferTime;
             if (ImGuiNET.ImGui.SliderFloat("Jump Buffer Time", ref tmpBuffer, 0.0f, 0.5f)) _ccData.JumpBufferTime = tmpBuffer;
+
+            // Debug / tuning
+            bool dbg = _debugDraw;
+            if (ImGuiNET.ImGui.Checkbox("Debug Draw Collisions", ref dbg)) _debugDraw = dbg;
+            float tmpRampThresh = _rampProjIgnoreThreshold;
+            if (ImGuiNET.ImGui.SliderFloat("Ramp Proj Ignore Threshold", ref tmpRampThresh, 0.0f, 0.5f)) _rampProjIgnoreThreshold = tmpRampThresh;
         }
 
         if (ImGuiNET.ImGui.CollapsingHeader("Runtime", ImGuiNET.ImGuiTreeNodeFlags.DefaultOpen))
@@ -531,6 +589,9 @@ public class Game : GameWindow
         GL.DeleteVertexArray(_sphereVao);
         GL.DeleteBuffer(_sphereVbo);
         GL.DeleteBuffer(_sphereEbo);
+        if (_lineVao != 0) GL.DeleteVertexArray(_lineVao);
+        if (_lineVbo != 0) GL.DeleteBuffer(_lineVbo);
+        _lineShader?.Dispose();
 
         _shader.Dispose();
         _imgui.Dispose();
@@ -703,6 +764,8 @@ public class Game : GameWindow
     // Resolve basic lateral penetration with oriented flat platforms and transport standing players on moving platforms.
     private void HandleSceneCollisionsAndTransport(float dt)
     {
+        // clear debug lines for this frame
+        _debugLineVertices.Clear();
         var pos = _ccData.Position;
         Vector2 posXZ = new Vector2(pos.X, pos.Z);
 
@@ -846,7 +909,7 @@ public class Game : GameWindow
 
                         // If the projected point on the ramp is significantly below the capsule bottom,
                         // we treat the capsule as coming from underneath and skip lifting the capsule onto the ramp.
-                        if (projHeight < capBottomPre - 0.05f)
+                        if (projHeight < capBottomPre - _rampProjIgnoreThreshold)
                         {
                             // skip this ramp resolution to avoid teleporting the player beneath the ramp
                             continue;
@@ -855,10 +918,31 @@ public class Game : GameWindow
                         float penetration = _ccData.Radius - dist + 0.0001f;
                         // push capsule out along plane normal (this will lift the capsule when coming from above)
                         var push = planeNormal * penetration;
+                        var origPos = _ccData.Position;
+                        if (_debugDraw)
+                        {
+                            // pClosest -> proj (green)
+                            _debugLineVertices.Add(pClosest.X); _debugLineVertices.Add(pClosest.Y); _debugLineVertices.Add(pClosest.Z);
+                            _debugLineVertices.Add(0f); _debugLineVertices.Add(1f); _debugLineVertices.Add(0f);
+                            _debugLineVertices.Add(proj.X); _debugLineVertices.Add(proj.Y); _debugLineVertices.Add(proj.Z);
+                            _debugLineVertices.Add(0f); _debugLineVertices.Add(1f); _debugLineVertices.Add(0f);
+                            // proj -> proj + normal (blue)
+                            var nend = proj + planeNormal * 0.5f;
+                            _debugLineVertices.Add(proj.X); _debugLineVertices.Add(proj.Y); _debugLineVertices.Add(proj.Z);
+                            _debugLineVertices.Add(0f); _debugLineVertices.Add(0.5f); _debugLineVertices.Add(1f);
+                            _debugLineVertices.Add(nend.X); _debugLineVertices.Add(nend.Y); _debugLineVertices.Add(nend.Z);
+                            _debugLineVertices.Add(0f); _debugLineVertices.Add(0.5f); _debugLineVertices.Add(1f);
+                            // original position -> pushed position (red)
+                            var pushed = origPos + push;
+                            _debugLineVertices.Add(origPos.X); _debugLineVertices.Add(origPos.Y); _debugLineVertices.Add(origPos.Z);
+                            _debugLineVertices.Add(1f); _debugLineVertices.Add(0f); _debugLineVertices.Add(0f);
+                            _debugLineVertices.Add(pushed.X); _debugLineVertices.Add(pushed.Y); _debugLineVertices.Add(pushed.Z);
+                            _debugLineVertices.Add(1f); _debugLineVertices.Add(0f); _debugLineVertices.Add(0f);
+                        }
                         _ccData.Position += push;
 
                         // If projection point lies at or slightly above capsule bottom, consider grounded
-                        if (projHeight >= capBottomPre - 0.05f && projHeight <= capTopPre - 0.05f && push.Y >= 0f)
+                        if (projHeight >= capBottomPre - _rampProjIgnoreThreshold && projHeight <= capTopPre - _rampProjIgnoreThreshold && push.Y >= 0f)
                         {
                             _ccData.IsGrounded = true;
                             _ccData.GroundNormal = planeNormal;
