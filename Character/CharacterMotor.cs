@@ -9,8 +9,9 @@ namespace AstrildCCSandbox.Character;
 public class CharacterMotor
 {
     private readonly CharacterControllerData _data;
-    // Optional ground query callback. Given an XZ position returns (height, normal) or null if no surface.
-    public Func<Vector2, (float height, Vector3 normal)?>? GroundQuery { get; set; }
+    // Optional ground query callback. Given an XZ position and a max search height (exclusive),
+    // returns the highest surface at or below maxSearchHeight, or null if none.
+    public Func<Vector2, float, (float height, Vector3 normal)?>? GroundQuery { get; set; }
 
     public CharacterMotor(CharacterControllerData data)
     {
@@ -32,7 +33,9 @@ public class CharacterMotor
         // Query scene for ground surface first (if provided), otherwise fall back to Y=0 plane
         float groundY = 0f;
         Vector3 groundNormal = Vector3.UnitY;
-        var query = GroundQuery?.Invoke(new Vector2(_data.Position.X, _data.Position.Z));
+        // ask the ground query to find surfaces at or below the capsule top (so overhead objects don't win)
+        float capsuleTopForQuery = _data.Position.Y + (_data.Height * 0.5f);
+        var query = GroundQuery?.Invoke(new Vector2(_data.Position.X, _data.Position.Z), capsuleTopForQuery - 0.05f);
         if (query != null)
         {
             groundY = query.Value.height;
@@ -74,6 +77,36 @@ public class CharacterMotor
             gv.Y -= _data.Gravity * dt;
             if (gv.Y < -_data.MaxFallSpeed) gv.Y = -_data.MaxFallSpeed;
             _data.Velocity = gv;
+        }
+
+        // Slope handling: if grounded and the ground normal exceeds MaxSlopeAngle,
+        // apply sliding along the downhill direction while still allowing player input
+        if (_data.IsGrounded && _data.GroundNormal != Vector3.Zero)
+        {
+            float dot = Vector3.Dot(_data.GroundNormal, Vector3.UnitY);
+            if (dot < -1f) dot = -1f;
+            if (dot > 1f) dot = 1f;
+            float slopeAngleDeg = MathHelper.RadiansToDegrees(MathF.Acos(dot));
+            if (slopeAngleDeg > _data.MaxSlopeAngle)
+            {
+                // downhill direction (project world down onto the ground plane)
+                var downhill = new Vector3(-_data.GroundNormal.X, 0f, -_data.GroundNormal.Z);
+                if (downhill.LengthSquared > 1e-6f)
+                    downhill = downhill.Normalized();
+                else
+                    downhill = Vector3.Zero;
+
+                // slide acceleration magnitude proportional to gravity and slope steepness
+                float slideAccel = _data.Gravity * MathF.Sin(MathHelper.DegreesToRadians(slopeAngleDeg));
+
+                // apply slide to horizontal velocity, but allow player input to counter (we already computed newH earlier)
+                var v = _data.Velocity;
+                v.X += downhill.X * slideAccel * dt;
+                v.Z += downhill.Z * slideAccel * dt;
+                // small downward bias so character remains on the slope
+                v.Y -= slideAccel * 0.05f * dt;
+                _data.Velocity = v;
+            }
         }
 
         // Horizontal movement with acceleration
@@ -121,7 +154,7 @@ public class CharacterMotor
         // Re-query scene at new XZ to detect ceilings/overhangs and resolve vertical penetration.
         // We only treat a surface as a ceiling if it lies within the vertical span of the capsule
         // (i.e. above the capsule bottom) and the capsule top penetrates the surface.
-        var postQuery = GroundQuery?.Invoke(new Vector2(_data.Position.X, _data.Position.Z));
+        var postQuery = GroundQuery?.Invoke(new Vector2(_data.Position.X, _data.Position.Z), _data.Position.Y + (_data.Height * 0.5f));
         if (postQuery != null)
         {
             float surfaceH = postQuery.Value.height;

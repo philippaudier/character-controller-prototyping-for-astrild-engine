@@ -774,8 +774,34 @@ public class Game : GameWindow
                     // Decide whether to snap the character onto the ramp surface (when interacting from above)
                     float halfHeight = _ccData.Height * 0.5f;
                     float bottomLocal = _ccData.Position.Y - halfHeight;
-                    if (r.TryGetHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), out float centerH, out Vector3 centerN))
+                    // Use ring sampling around the capsule XZ to compute a reliable surface height under the capsule
+                    float sampleRadius = MathF.Max(_ccData.Radius * 0.5f, 0.01f);
+                    int ringSamples = 8;
+                    float bestCenterH = float.MinValue;
+                    Vector3 bestCenterN = Vector3.UnitY;
+                    for (int rs = 0; rs < ringSamples; rs++)
                     {
+                        float a = (rs / (float)ringSamples) * MathF.PI * 2f;
+                        var sx = _ccData.Position.X + MathF.Cos(a) * sampleRadius;
+                        var sz = _ccData.Position.Z + MathF.Sin(a) * sampleRadius;
+                        if (r.TryGetHeight(new Vector2(sx, sz), out float sh, out Vector3 sn))
+                        {
+                            if (sh > bestCenterH)
+                            {
+                                bestCenterH = sh;
+                                bestCenterN = sn;
+                            }
+                        }
+                    }
+                    // also include direct center
+                    if (r.TryGetHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), out float cH, out Vector3 cN))
+                    {
+                        if (cH > bestCenterH) { bestCenterH = cH; bestCenterN = cN; }
+                    }
+                    if (bestCenterH != float.MinValue)
+                    {
+                        float centerH = bestCenterH;
+                        Vector3 centerN = bestCenterN;
                         // If the ramp top is at or slightly above the capsule bottom, snap onto the ramp.
                         if (centerH >= bottomLocal - 0.05f)
                         {
