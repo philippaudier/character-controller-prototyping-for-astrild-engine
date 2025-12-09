@@ -332,16 +332,24 @@ public class Game : GameWindow
             // Also perform capsule-vs-OBB resolution for each flat platform
             if (s is FlatPlatform obb)
             {
-                // OBB parameters
-                Vector3 obbCenter = new Vector3(obb.Center.X, obb.TopY + 0.1f, obb.Center.Z);
-                Vector3 halfExtents = new Vector3(obb.SizeX * 0.5f, 0.1f, obb.SizeZ * 0.5f);
+                // OBB parameters: use a thin box representing the platform top area
+                float platThickness = 0.2f;
+                Vector3 obbCenter = new Vector3(obb.Center.X, obb.TopY - platThickness * 0.5f, obb.Center.Z);
+                Vector3 halfExtents = new Vector3(obb.SizeX * 0.5f, platThickness * 0.5f, obb.SizeZ * 0.5f);
                 float rotY = obb.RotationYDeg;
 
                 // capsule segment (in world space)
                 float cylHalf = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
                 var segA = _ccData.Position + new Vector3(0f, cylHalf, 0f);
                 var segB = _ccData.Position - new Vector3(0f, cylHalf, 0f);
-                if (CapsuleIntersectsOBB(segA, segB, _ccData.Radius, obbCenter, halfExtents, rotY, out Vector3 mtv))
+                // Quick vertical overlap check: skip OBB test if capsule is fully below platform bottom
+                float capTop = _ccData.Position.Y + cylHalf;
+                float platformBottom = obb.TopY - platThickness;
+                if (capTop <= platformBottom - 0.01f)
+                {
+                    // capsule is entirely below platform bottom: allow passing under
+                }
+                else if (CapsuleIntersectsOBB(segA, segB, _ccData.Radius, obbCenter, halfExtents, rotY, out Vector3 mtv))
                 {
                     // push the character by the MTV
                     _ccData.Position += mtv;
@@ -691,6 +699,12 @@ public class Game : GameWindow
                 float bottom = _ccData.Position.Y - (_ccData.Height * 0.5f);
                 if (bottom > topY + 0.2f) continue;
 
+                // skip lateral collision if the capsule is entirely below the platform bottom (so player can pass under)
+                float platThickness = 0.2f;
+                float platformBottom = topY - platThickness;
+                float capTop = _ccData.Position.Y + MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
+                if (capTop <= platformBottom - 0.01f) continue;
+
                 // closest point in world space
                 float wy = MathHelper.DegreesToRadians(fp.RotationYDeg);
                 float c2 = (float)Math.Cos(wy);
@@ -735,18 +749,21 @@ public class Game : GameWindow
                 {
                     float t = samples == 1 ? 0f : (float)i / (samples - 1);
                     var sample = Vector3.Lerp(segA, segB, t);
-                    if (r.TryGetHeight(new Vector2(sample.X, sample.Z), out float h, out Vector3 normal))
-                    {
-                        float deltaY = sample.Y - h;
-                        if (deltaY < _ccData.Radius)
+                        if (r.TryGetHeight(new Vector2(sample.X, sample.Z), out float h, out Vector3 normal))
                         {
-                            float pen = _ccData.Radius - deltaY;
-                            var push = normal * pen;
-                            accumPush += push;
-                            accumNormal += normal * pen;
-                            totalPen += pen;
+                            float deltaY = sample.Y - h;
+                            // Ignore samples that are substantially below the ramp surface (we allow passing under).
+                            if (sample.Y < h - 0.02f)
+                                continue;
+                            if (deltaY < _ccData.Radius)
+                            {
+                                float pen = _ccData.Radius - deltaY;
+                                var push = normal * pen;
+                                accumPush += push;
+                                accumNormal += normal * pen;
+                                totalPen += pen;
+                            }
                         }
-                    }
                 }
                 if (totalPen > 0f)
                 {

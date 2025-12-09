@@ -115,6 +115,40 @@ public class CharacterMotor
         {
             _data.Position += _data.PlatformVelocity * dt;
         }
+
+        // Re-query scene at new XZ to detect ceilings/overhangs and resolve vertical penetration.
+        // We only treat a surface as a ceiling if it lies within the vertical span of the capsule
+        // (i.e. above the capsule bottom) and the capsule top penetrates the surface.
+        var postQuery = GroundQuery?.Invoke(new Vector2(_data.Position.X, _data.Position.Z));
+        if (postQuery != null)
+        {
+            float surfaceH = postQuery.Value.height;
+            // capsule vertical extents
+            float half = _data.Height * 0.5f;
+            float capBottom = _data.Position.Y - half;
+            float capTop = _data.Position.Y + half;
+            // only consider this surface a potential ceiling if it is above the capsule bottom
+            if (surfaceH > capBottom + 1e-4f)
+            {
+                float allowedTop = surfaceH - _data.SkinWidth;
+                if (capTop > allowedTop)
+                {
+                    float penetration = capTop - allowedTop;
+                    var p = _data.Position;
+                    p.Y -= penetration;
+                    _data.Position = p;
+                    // cancel upward velocity so we don't immediately re-penetrate
+                    if (_data.Velocity.Y > 0f)
+                    {
+                        var v = _data.Velocity;
+                        v.Y = 0f;
+                        _data.Velocity = v;
+                    }
+                    // also mark not grounded (we are colliding above)
+                    _data.IsGrounded = false;
+                }
+            }
+        }
     }
 
     private static Vector2 MoveTowards(Vector2 current, Vector2 target, float maxDelta)
