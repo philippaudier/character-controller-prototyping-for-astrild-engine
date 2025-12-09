@@ -489,9 +489,10 @@ public class Game : GameWindow
         _imgui.Dispose();
     }
 
-    // Query the scene for the highest surface under the given XZ point.
-    // Returns null if no surface found (falls back to Y=0 in the motor).
-    private (float height, Vector3 normal)? QuerySceneHeight(Vector2 xz)
+    // Query the scene for the highest surface at or below the given maxSearchHeight.
+    // If maxSearchHeight is +Infinity, behaves like previous QuerySceneHeight.
+    // Returns null if no surface found (motor should fall back to Y=0).
+    private (float height, Vector3 normal)? QuerySceneHeight(Vector2 xz, float maxSearchHeight)
     {
         float bestH = float.MinValue;
         Vector3 bestN = Vector3.UnitY;
@@ -500,7 +501,7 @@ public class Game : GameWindow
         {
             if (s.TryGetHeight(xz, out float h, out Vector3 n))
             {
-                if (!found || h > bestH)
+                if (h <= maxSearchHeight && (!found || h > bestH))
                 {
                     bestH = h;
                     bestN = n;
@@ -771,15 +772,16 @@ public class Game : GameWindow
                     var avgPush = accumPush / totalPen;
 
                     // Decide whether to snap the character onto the ramp surface (when interacting from above)
-                    float cylHalfLocal = MathF.Max(0f, (_ccData.Height * 0.5f) - _ccData.Radius);
-                    float bottomLocal = _ccData.Position.Y - cylHalfLocal;
+                    float halfHeight = _ccData.Height * 0.5f;
+                    float bottomLocal = _ccData.Position.Y - halfHeight;
                     if (r.TryGetHeight(new Vector2(_ccData.Position.X, _ccData.Position.Z), out float centerH, out Vector3 centerN))
                     {
                         // If the ramp top is at or slightly above the capsule bottom, snap onto the ramp.
                         if (centerH >= bottomLocal - 0.05f)
                         {
                             var p = _ccData.Position;
-                            p.Y = centerH + cylHalfLocal + _ccData.SkinWidth;
+                            // place capsule so its bottom sits on the ramp top
+                            p.Y = centerH + halfHeight + _ccData.SkinWidth;
                             _ccData.Position = p;
                             _ccData.IsGrounded = true;
                             _ccData.GroundNormal = centerN;
